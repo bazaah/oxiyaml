@@ -1,134 +1,195 @@
-use std::marker::PhantomData;
+use std::{convert::TryFrom, fmt, marker::PhantomData};
 
-struct StateMachine<'state, S = StateA<'state>>
+struct CountMachine<'state, S = Start>
 where
-    S: Lifetime<'state> + 'state,
+    S: Describe + 'state,
 {
-    data: String,
+    data: Box<dyn Iterator<Item = u8> + 'state>,
+    buffer: Vec<u8>,
     state: S,
+
+    t_words: usize,
+    t_letters: usize,
+
     mkr: PhantomData<&'state S>,
 }
 
-impl<'state> StateMachine<'state> {
-    fn with_words(words: &'state str) -> Self {
-        StateMachine {
-            data: format!("dank memes"),
-            state: StateA { value: words },
+impl<'state> CountMachine<'state> {
+    fn new(data: impl Iterator<Item = u8> + 'state) -> Self {
+        CountMachine {
+            data: Box::new(data),
+            buffer: Default::default(),
+            state: Start,
+            t_words: 0,
+            t_letters: 0,
             mkr: PhantomData,
         }
     }
 }
 
-impl<'state> Default for StateMachine<'state> {
-    fn default() -> Self {
-        Self {
-            data: format!("dank memes"),
-            state: Default::default(),
+impl<'state> CountMachine<'state, Word> {
+    fn next_word(&mut self) {
+        self.state.get_word(&mut self.buffer, &mut self.data);
+        if !self.buffer.is_empty() {
+            self.t_words += 1;
+        }
+    }
+}
+
+impl<'state> CountMachine<'state, Letters> {
+    fn count_letters(&mut self) {
+        self.t_letters += self.state.count_letters(&self.buffer);
+    }
+}
+
+impl<'state> CountMachine<'state, Done> {
+    fn done(self) -> (usize, usize) {
+        self.into()
+    }
+}
+
+impl<'state> From<CountMachine<'state>> for CountMachine<'state, Word> {
+    fn from(prev: CountMachine<'state>) -> Self {
+        CountMachine {
+            data: prev.data,
+            buffer: prev.buffer,
+            state: Word::new(),
+            t_words: prev.t_words,
+            t_letters: prev.t_letters,
             mkr: PhantomData,
         }
     }
 }
 
-impl<'state, S> Lifetime<'state> for StateMachine<'state, S>
-where
-    S: Lifetime<'state> + 'state,
-{
-    fn value(&'state self) -> &'state str {
-        self.state.value()
+impl<'state> TryFrom<CountMachine<'state, Word>> for CountMachine<'state, Letters> {
+    type Error = CountMachine<'state, Done>;
+
+    fn try_from(mut prev: CountMachine<'state, Word>) -> Result<Self, Self::Error> {
+        prev.next_word();
+        match prev.buffer.is_empty() {
+            true => Err(CountMachine {
+                data: prev.data,
+                buffer: prev.buffer,
+                state: Done,
+                t_words: prev.t_words,
+                t_letters: prev.t_letters,
+                mkr: PhantomData,
+            }),
+            false => Ok(CountMachine {
+                data: prev.data,
+                buffer: prev.buffer,
+                state: Letters::new(),
+                t_words: prev.t_words,
+                t_letters: prev.t_letters,
+                mkr: PhantomData,
+            }),
+        }
     }
 }
 
-impl<'state> From<StateMachine<'state, StateA<'state>>> for StateMachine<'state, StateB<'state>> {
-    fn from(s: StateMachine<'state, StateA<'state>>) -> Self {
-        StateMachine {
-            data: s.data,
-            state: StateB::new(s.state.value),
+impl<'state> From<CountMachine<'state, Letters>> for CountMachine<'state, Word> {
+    fn from(mut prev: CountMachine<'state, Letters>) -> Self {
+        prev.count_letters();
+        prev.buffer.clear();
+        CountMachine {
+            data: prev.data,
+            buffer: prev.buffer,
+            state: Word::new(),
+            t_words: prev.t_words,
+            t_letters: prev.t_letters,
             mkr: PhantomData,
         }
     }
 }
 
-impl<'state> From<StateMachine<'state, StateB<'state>>> for StateMachine<'state, StateC> {
-    fn from(s: StateMachine<'state, StateB<'state>>) -> Self {
-        StateMachine {
-            data: s.data,
-            state: StateC::new(&s.state.split),
-            mkr: PhantomData,
+impl<'state> From<CountMachine<'state, Done>> for (usize, usize) {
+    fn from(prev: CountMachine<'state, Done>) -> Self {
+        (prev.t_words, prev.t_letters)
+    }
+}
+
+struct Start;
+
+impl Describe for Start {}
+
+struct Word {
+    pristine: bool,
+}
+
+impl Word {
+    fn new() -> Self {
+        Self { pristine: true }
+    }
+
+    fn get_word(&mut self, buffer: &mut Vec<u8>, source: &mut impl Iterator<Item = u8>) {
+        while let Some(letter) = source.next() {
+            match letter {
+                b' ' | b'\n' | b'\t' => break,
+                _ => buffer.push(letter),
+            }
+            self.pristine = false;
         }
     }
 }
 
-trait Lifetime<'state> {
-    fn value(&'state self) -> &'state str;
-}
-
-#[derive(Default)]
-struct StateA<'state> {
-    value: &'state str,
-}
-
-impl<'state> Lifetime<'state> for StateA<'state> {
-    fn value(&'state self) -> &'state str {
-        self.value
-    }
-}
-
-struct StateB<'state> {
-    split: Vec<&'state str>,
-}
-
-impl<'state> StateB<'state> {
-    fn new(src: &'state str) -> Self {
-        Self {
-            split: src.split(' ').collect(),
+impl Describe for Word {
+    fn describe(&self) -> &dyn fmt::Display {
+        if self.pristine {
+            &"no word yet"
+        } else {
+            &"have a word"
         }
     }
 }
 
-impl<'state> Lifetime<'state> for StateB<'state> {
-    fn value(&'state self) -> &'state str {
-        self.split[0]
+struct Letters;
+
+impl Letters {
+    fn new() -> Self {
+        Self
+    }
+
+    fn count_letters(&self, word: &[u8]) -> usize {
+        word.len()
     }
 }
 
-struct StateC {
-    last: String,
-}
-
-impl StateC {
-    fn new<S: AsRef<str>>(words: &[S]) -> Self {
-        let last =
-            words
-                .iter()
-                .map(|s| s.as_ref())
-                .rev()
-                .fold(String::default(), |mut last, word| {
-                    last += word;
-                    last
-                });
-        StateC { last }
+impl Describe for Letters {
+    fn describe(&self) -> &dyn fmt::Display {
+        &"some letters here"
     }
 }
 
-impl<'state> Lifetime<'state> for StateC {
-    fn value(&'state self) -> &'state str {
-        self.last.as_str()
+struct Done;
+
+impl Describe for Done {}
+
+trait Describe {
+    fn describe(&self) -> &dyn fmt::Display {
+        &"nothing here"
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::convert::TryInto;
 
     #[test]
-    fn check() {
-        let state = StateMachine::with_words("dank memes boi");
-        assert_eq!(state.value(), "dank memes boi");
+    fn check_state() {
+        let data = "my very energetic mother jumped straight under nine planets";
+        let mut machine: CountMachine<Word> = CountMachine::new(data.bytes()).into();
 
-        let state: StateMachine<StateB> = state.into();
-        assert_eq!(state.value(), "dank");
+        let (words, letters): (usize, usize) = loop {
+            match <CountMachine<Word> as TryInto<CountMachine<Letters>>>::try_into(machine) {
+                Ok(words) => machine = words.into(),
+                Err(done) => break done.done(),
+            }
+        };
 
-        let state: StateMachine<StateC> = state.into();
-        assert_eq!(state.value(), "boimemesdank")
+        println!("total words: {} | total letters: {}", words, letters,);
+        panic!()
     }
+
+    fn different_types() {}
 }

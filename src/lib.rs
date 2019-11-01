@@ -1,195 +1,106 @@
-use std::{convert::TryFrom, fmt, marker::PhantomData};
+#![allow(dead_code)]
 
-struct CountMachine<'state, S = Start>
+//mod assets;
+mod machine;
+mod scanner;
+mod states;
+
+pub(self) use crate::{machine::IndentMachine, scanner::*, states::*};
+
+const SAMPLE: &str = r#"zero
+    one
+        two 
+            three
+    one
+zero
+"#;
+
+enum State<I> {
+    Start(IndentMachine<I, Start>),
+    WhiteSpace(IndentMachine<I, WhiteSpace>),
+    Ignore(IndentMachine<I, Ignore>),
+    LineStart(IndentMachine<I, LineStart, Active>),
+    LineEnd(IndentMachine<I, LineEnd>),
+    Done(IndentMachine<I, Done>),
+    Failure(IndentMachine<I, Failure>),
+}
+
+impl<I> State<I>
 where
-    S: Describe + 'state,
+    I: Iterator<Item = u8>,
 {
-    data: Box<dyn Iterator<Item = u8> + 'state>,
-    buffer: Vec<u8>,
-    state: S,
-
-    t_words: usize,
-    t_letters: usize,
-
-    mkr: PhantomData<&'state S>,
-}
-
-impl<'state> CountMachine<'state> {
-    fn new(data: impl Iterator<Item = u8> + 'state) -> Self {
-        CountMachine {
-            data: Box::new(data),
-            buffer: Default::default(),
-            state: Start,
-            t_words: 0,
-            t_letters: 0,
-            mkr: PhantomData,
-        }
-    }
-}
-
-impl<'state> CountMachine<'state, Word> {
-    fn next_word(&mut self) {
-        self.state.get_word(&mut self.buffer, &mut self.data);
-        if !self.buffer.is_empty() {
-            self.t_words += 1;
-        }
-    }
-}
-
-impl<'state> CountMachine<'state, Letters> {
-    fn count_letters(&mut self) {
-        self.t_letters += self.state.count_letters(&self.buffer);
-    }
-}
-
-impl<'state> CountMachine<'state, Done> {
-    fn done(self) -> (usize, usize) {
-        self.into()
-    }
-}
-
-impl<'state> From<CountMachine<'state>> for CountMachine<'state, Word> {
-    fn from(prev: CountMachine<'state>) -> Self {
-        CountMachine {
-            data: prev.data,
-            buffer: prev.buffer,
-            state: Word::new(),
-            t_words: prev.t_words,
-            t_letters: prev.t_letters,
-            mkr: PhantomData,
-        }
-    }
-}
-
-impl<'state> TryFrom<CountMachine<'state, Word>> for CountMachine<'state, Letters> {
-    type Error = CountMachine<'state, Done>;
-
-    fn try_from(mut prev: CountMachine<'state, Word>) -> Result<Self, Self::Error> {
-        prev.next_word();
-        match prev.buffer.is_empty() {
-            true => Err(CountMachine {
-                data: prev.data,
-                buffer: prev.buffer,
-                state: Done,
-                t_words: prev.t_words,
-                t_letters: prev.t_letters,
-                mkr: PhantomData,
-            }),
-            false => Ok(CountMachine {
-                data: prev.data,
-                buffer: prev.buffer,
-                state: Letters::new(),
-                t_words: prev.t_words,
-                t_letters: prev.t_letters,
-                mkr: PhantomData,
-            }),
-        }
-    }
-}
-
-impl<'state> From<CountMachine<'state, Letters>> for CountMachine<'state, Word> {
-    fn from(mut prev: CountMachine<'state, Letters>) -> Self {
-        prev.count_letters();
-        prev.buffer.clear();
-        CountMachine {
-            data: prev.data,
-            buffer: prev.buffer,
-            state: Word::new(),
-            t_words: prev.t_words,
-            t_letters: prev.t_letters,
-            mkr: PhantomData,
-        }
-    }
-}
-
-impl<'state> From<CountMachine<'state, Done>> for (usize, usize) {
-    fn from(prev: CountMachine<'state, Done>) -> Self {
-        (prev.t_words, prev.t_letters)
-    }
-}
-
-struct Start;
-
-impl Describe for Start {}
-
-struct Word {
-    pristine: bool,
-}
-
-impl Word {
-    fn new() -> Self {
-        Self { pristine: true }
+    fn new(stream: I) -> Self {
+        Self::Start(IndentMachine::new(stream))
     }
 
-    fn get_word(&mut self, buffer: &mut Vec<u8>, source: &mut impl Iterator<Item = u8>) {
-        while let Some(letter) = source.next() {
-            match letter {
-                b' ' | b'\n' | b'\t' => break,
-                _ => buffer.push(letter),
+    fn process(self) -> Result<String, String> {
+        let mut check = 0;
+        let mut bind = self;
+
+        loop {
+            match bind {
+                Self::Done(dn) => return Ok(dn.done()),
+                Self::Failure(fail) => return Err(fail.error()),
+                _ if check > 100 => return Err(format!("SOmething is wrong in step")),
+                _ => {
+                    check += 1;
+                    bind = bind.step()
+                }
             }
-            self.pristine = false;
         }
     }
-}
 
-impl Describe for Word {
-    fn describe(&self) -> &dyn fmt::Display {
-        if self.pristine {
-            &"no word yet"
-        } else {
-            &"have a word"
+    fn step(self) -> Self {
+        match self {
+            Self::Start(mut st) => match st.cycle() {
+                Marker::LineStart => Self::LineStart(st.into()),
+                Marker::Ignore => Self::Ignore(st.into()),
+                Marker::LineEnd => Self::LineEnd(st.into()),
+                Marker::Done => Self::Done(st.into()),
+                _ => Self::Failure((format!("Invalid transition"), st).into()),
+            },
+            Self::WhiteSpace(mut st) => match st.cycle() {
+                Marker::LineEnd => Self::LineEnd(st.into()),
+                Marker::Ignore => Self::Ignore(st.into()),
+                Marker::Done => Self::Done(st.into()),
+                _ => Self::Failure((format!("Invalid transition"), st).into()),
+            },
+            Self::Ignore(mut st) => match st.cycle() {
+                Marker::LineEnd => Self::LineEnd(st.into()),
+                Marker::WhiteSpace => Self::WhiteSpace(st.into()),
+                Marker::Done => Self::Done(st.into()),
+                Marker::Failure => Self::Failure((format!("State violation (Ignore)"), st).into()),
+                _ => Self::Failure((format!("Invalid transition"), st).into()),
+            },
+            Self::LineStart(mut st) => match st.cycle() {
+                Marker::LineEnd => Self::LineEnd(st.into()),
+                Marker::Ignore => Self::Ignore(st.into()),
+                Marker::Done => Self::Done(st.into()),
+                _ => Self::Failure((format!("Invalid transition"), st).into()),
+            },
+            Self::LineEnd(mut st) => match st.cycle() {
+                Marker::LineStart => Self::LineStart(st.into()),
+                Marker::Done => Self::Done(st.into()),
+                Marker::Failure => Self::Failure((format!("State violation (LineEnd)"), st).into()),
+                _ => Self::Failure((format!("Invalid transition"), st).into()),
+            },
+            st @ Self::Done(_) => st,
+            st @ Self::Failure(_) => st,
         }
-    }
-}
-
-struct Letters;
-
-impl Letters {
-    fn new() -> Self {
-        Self
-    }
-
-    fn count_letters(&self, word: &[u8]) -> usize {
-        word.len()
-    }
-}
-
-impl Describe for Letters {
-    fn describe(&self) -> &dyn fmt::Display {
-        &"some letters here"
-    }
-}
-
-struct Done;
-
-impl Describe for Done {}
-
-trait Describe {
-    fn describe(&self) -> &dyn fmt::Display {
-        &"nothing here"
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::convert::TryInto;
 
     #[test]
-    fn check_state() {
-        let data = "my very energetic mother jumped straight under nine planets";
-        let mut machine: CountMachine<Word> = CountMachine::new(data.bytes()).into();
+    fn check_state_machine() {
+        let data = SAMPLE;
+        let result = State::new(data.bytes()).process();
 
-        let (words, letters): (usize, usize) = loop {
-            match <CountMachine<Word> as TryInto<CountMachine<Letters>>>::try_into(machine) {
-                Ok(words) => machine = words.into(),
-                Err(done) => break done.done(),
-            }
-        };
+        println!("State machine says: {:?}", result);
 
-        println!("total words: {} | total letters: {}", words, letters,);
-        panic!()
+        panic!();
     }
-
-    fn different_types() {}
 }

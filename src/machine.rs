@@ -1,19 +1,28 @@
-use super::{scanner::*, states::*};
+use {
+    super::{scanner::*, states::*},
+    std::collections::VecDeque,
+};
 
-pub(super) struct IndentMachine<I, S = Start, M = Inactive> {
+pub(super) struct StateMachine<I, S = Start, INDENT = Inactive> {
+    // Current state
     state: S,
 
-    scan: Scan<I, M>,
+    // Byte iter
+    scan: Scan<I, INDENT>,
+
+    // Node storage
+    store: VecDeque<Vec<u8>>,
 }
 
-impl<I> IndentMachine<I>
+impl<I> StateMachine<I>
 where
     I: Iterator<Item = u8>,
 {
     pub(super) fn new(stream: I) -> Self {
-        IndentMachine {
+        StateMachine {
             state: Default::default(),
             scan: Scan::new(stream),
+            store: Default::default(),
         }
     }
 
@@ -22,7 +31,7 @@ where
     }
 }
 
-impl<I> IndentMachine<I, WhiteSpace>
+impl<I> StateMachine<I, WhiteSpace>
 where
     I: Iterator<Item = u8>,
 {
@@ -33,7 +42,7 @@ where
     }
 }
 
-impl<I> IndentMachine<I, Ignore>
+impl<I> StateMachine<I, Ignore>
 where
     I: Iterator<Item = u8>,
 {
@@ -44,7 +53,7 @@ where
     }
 }
 
-impl<I> IndentMachine<I, LineStart, Active>
+impl<I> StateMachine<I, LineStart, Active>
 where
     I: Iterator<Item = u8>,
 {
@@ -55,7 +64,7 @@ where
     }
 }
 
-impl<I> IndentMachine<I, LineEnd>
+impl<I> StateMachine<I, LineEnd>
 where
     I: Iterator<Item = u8>,
 {
@@ -66,7 +75,19 @@ where
     }
 }
 
-impl<I> IndentMachine<I, Done>
+impl<I> StateMachine<I, MapKey>
+where
+    I: Iterator<Item = u8>,
+{
+    // pub(super) fn cycle(&mut self) -> Marker {
+    //     self.state.parse_key(&mut self.scan);
+
+    //     Marker::Failure
+    // }
+}
+
+/* Exit States */
+impl<I> StateMachine<I, Done>
 where
     I: Iterator<Item = u8>,
 {
@@ -75,7 +96,7 @@ where
     }
 }
 
-impl<I> IndentMachine<I, Failure>
+impl<I> StateMachine<I, Failure>
 where
     I: Iterator<Item = u8>,
 {
@@ -84,14 +105,16 @@ where
     }
 }
 
-impl<I> From<IndentMachine<I, Start>> for IndentMachine<I, LineStart, Active>
+/* Legal state transitions */
+impl<I> From<StateMachine<I, Start>> for StateMachine<I, LineStart, Active>
 where
     I: Iterator<Item = u8>,
 {
-    fn from(prev: IndentMachine<I, Start>) -> Self {
+    fn from(prev: StateMachine<I, Start>) -> Self {
         Self {
             state: Default::default(),
             scan: prev.scan.activate(),
+            store: Default::default(),
         }
     }
 }
@@ -99,11 +122,12 @@ where
 macro_rules! from_start {
     ( $($type:ident),* ) => {
         $(
-            impl<I: Iterator<Item = u8>> From<IndentMachine<I, Start>> for IndentMachine<I, $type> {
-                fn from(prev: IndentMachine<I, Start>) -> Self {
+            impl<I: Iterator<Item = u8>> From<StateMachine<I, Start>> for StateMachine<I, $type> {
+                fn from(prev: StateMachine<I, Start>) -> Self {
                     Self {
                         state: Default::default(),
                         scan: prev.scan,
+                        store: prev.store,
                     }
                 }
             }
@@ -111,16 +135,17 @@ macro_rules! from_start {
     };
 }
 
-from_start!(Ignore, LineEnd, Done);
+from_start!(Done);
 
 macro_rules! from_whitespace {
     ( $($type:ident),* ) => {
         $(
-            impl<I: Iterator<Item = u8>> From<IndentMachine<I, WhiteSpace>> for IndentMachine<I, $type> {
-                fn from(prev: IndentMachine<I, WhiteSpace>) -> Self {
+            impl<I: Iterator<Item = u8>> From<StateMachine<I, WhiteSpace>> for StateMachine<I, $type> {
+                fn from(prev: StateMachine<I, WhiteSpace>) -> Self {
                     Self {
                         state: Default::default(),
                         scan: prev.scan,
+                        store: prev.store,
                     }
                 }
             }
@@ -133,11 +158,12 @@ from_whitespace!(LineEnd, Ignore, Done);
 macro_rules! from_ignore {
     ( $($type:ident),* ) => {
         $(
-            impl<I: Iterator<Item = u8>> From<IndentMachine<I, Ignore>> for IndentMachine<I, $type> {
-                fn from(prev: IndentMachine<I, Ignore>) -> Self {
+            impl<I: Iterator<Item = u8>> From<StateMachine<I, Ignore>> for StateMachine<I, $type> {
+                fn from(prev: StateMachine<I, Ignore>) -> Self {
                     Self {
                         state: Default::default(),
                         scan: prev.scan,
+                        store: prev.store,
                     }
                 }
             }
@@ -150,11 +176,12 @@ from_ignore!(LineEnd, WhiteSpace, Done);
 macro_rules! from_linestart {
     ( $($type:ident),* ) => {
         $(
-            impl<I: Iterator<Item = u8>> From<IndentMachine<I, LineStart, Active>> for IndentMachine<I, $type> {
-                fn from(prev: IndentMachine<I, LineStart, Active>) -> Self {
+            impl<I: Iterator<Item = u8>> From<StateMachine<I, LineStart, Active>> for StateMachine<I, $type> {
+                fn from(prev: StateMachine<I, LineStart, Active>) -> Self {
                     Self {
                         state: Default::default(),
                         scan: prev.scan.deactivate(),
+                        store: prev.store,
                     }
                 }
             }
@@ -167,11 +194,12 @@ from_linestart!(LineEnd, Ignore, Done);
 macro_rules! from_lineend {
     ( $($type:ident),* ) => {
         $(
-            impl<I: Iterator<Item = u8>> From<IndentMachine<I, LineEnd>> for IndentMachine<I, $type> {
-                fn from(prev: IndentMachine<I, LineEnd>) -> Self {
+            impl<I: Iterator<Item = u8>> From<StateMachine<I, LineEnd>> for StateMachine<I, $type> {
+                fn from(prev: StateMachine<I, LineEnd>) -> Self {
                     Self {
                         state: Default::default(),
                         scan: prev.scan,
+                        store: prev.store,
                     }
                 }
             }
@@ -181,64 +209,43 @@ macro_rules! from_lineend {
 
 from_lineend!(Done);
 
-impl<I> From<IndentMachine<I, LineEnd>> for IndentMachine<I, LineStart, Active>
+impl<I> From<StateMachine<I, LineEnd>> for StateMachine<I, LineStart, Active>
 where
     I: Iterator<Item = u8>,
 {
-    fn from(prev: IndentMachine<I, LineEnd>) -> Self {
+    fn from(prev: StateMachine<I, LineEnd>) -> Self {
         Self {
             state: Default::default(),
             scan: prev.scan.activate(),
+            store: prev.store,
         }
     }
 }
 
-impl<T, I, S> From<(T, IndentMachine<I, S>)> for IndentMachine<I, Failure>
+impl<T, I, S> From<(T, StateMachine<I, S>)> for StateMachine<I, Failure>
 where
     T: ToString,
     I: Iterator<Item = u8>,
 {
-    fn from((msg, prev): (T, IndentMachine<I, S>)) -> Self {
-        IndentMachine {
+    fn from((msg, prev): (T, StateMachine<I, S>)) -> Self {
+        StateMachine {
             state: Failure::new(msg),
             scan: prev.scan,
+            store: prev.store,
         }
     }
 }
 
-impl<T, I, S> From<(T, IndentMachine<I, S, Active>)> for IndentMachine<I, Failure>
+impl<T, I, S> From<(T, StateMachine<I, S, Active>)> for StateMachine<I, Failure>
 where
     T: ToString,
     I: Iterator<Item = u8>,
 {
-    fn from((msg, prev): (T, IndentMachine<I, S, Active>)) -> Self {
-        IndentMachine {
+    fn from((msg, prev): (T, StateMachine<I, S, Active>)) -> Self {
+        StateMachine {
             state: Failure::new(msg),
             scan: prev.scan.deactivate(),
+            store: prev.store,
         }
     }
 }
-
-// trait NextState {
-//     fn next_state(&mut self) -> Marker;
-// }
-
-// macro_rules! impl_next_state {
-//     ( $($type:ident),* ) => {
-//         $(
-//             impl<I: Iterator<Item = u8>> NextState for IndentMachine<I, $type> {
-//                 fn next_state(&mut self) -> Marker {
-//                     self.state.find_next(&mut self.scan)
-//                 }
-//             }
-//         )*
-//     };
-// }
-
-// impl_next_state!(Start, WhiteSpace, Ignore, LineEnd);
-
-// impl<I: Iterator<Item = u8>> NextState for IndentMachine<I, LineStart, Active> {
-//     fn next_state(&mut self) -> Marker {
-//         self.state.find_next(&mut self.scan)
-//     }
-// }

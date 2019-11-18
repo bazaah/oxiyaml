@@ -183,7 +183,7 @@ impl Default for IndentTrack {
             floor: 0,
             previous: 0,
             current: 0,
-            history: vec![0],
+            history: Default::default(),
         }
     }
 }
@@ -194,12 +194,8 @@ pub(super) struct Active;
 #[derive(Debug, Default)]
 pub(super) struct Inactive;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
 
-    // #[test]
-    // fn feature() {
-    //     let scan = Scan::new("a b c".bytes());
-    // }
-}
+// }

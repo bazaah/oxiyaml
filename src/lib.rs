@@ -1,28 +1,50 @@
 #![allow(dead_code)]
 
-//mod assets;
 mod machine;
+mod node;
 mod scanner;
 mod states;
 
-pub(self) use crate::{machine::IndentMachine, scanner::*, states::*};
+pub(self) use crate::{machine::StateMachine, scanner::*, states::*, node::NodeKind};
 
-const SAMPLE: &str = r#"zero
-    one
-        two 
-            three
-    one
+const SAMPLE: &str = 
+/* Formatting */
+r#"zero
+    four: a mapping value
+        eight
+            twelve
+    four
 zero
 "#;
 
+struct Handle<I> {
+    machine: State<I>,
+}
+
+impl<I> Handle<I>
+where
+    I: Iterator<Item = u8>,
+{
+    fn new(stream: I) -> Self {
+        Self {
+            machine: State::new(stream),
+        }
+    }
+
+    fn next_output(&mut self) -> Result<NodeKind, String> {} 
+}
+
 enum State<I> {
-    Start(IndentMachine<I, Start>),
-    WhiteSpace(IndentMachine<I, WhiteSpace>),
-    Ignore(IndentMachine<I, Ignore>),
-    LineStart(IndentMachine<I, LineStart, Active>),
-    LineEnd(IndentMachine<I, LineEnd>),
-    Done(IndentMachine<I, Done>),
-    Failure(IndentMachine<I, Failure>),
+    Start(StateMachine<I, Start>),
+    WhiteSpace(StateMachine<I, WhiteSpace>),
+    Ignore(StateMachine<I, Ignore>),
+    LineStart(StateMachine<I, LineStart, Active>),
+    LineEnd(StateMachine<I, LineEnd>),
+    Done(StateMachine<I, Done>),
+    Failure(StateMachine<I, Failure>),
+
+    // Dummy type
+    Dummy,
 }
 
 impl<I> State<I>
@@ -30,7 +52,7 @@ where
     I: Iterator<Item = u8>,
 {
     fn new(stream: I) -> Self {
-        Self::Start(IndentMachine::new(stream))
+        Self::Start(StateMachine::new(stream))
     }
 
     fn process(self) -> Result<String, String> {
@@ -41,7 +63,7 @@ where
             match bind {
                 Self::Done(dn) => return Ok(dn.done()),
                 Self::Failure(fail) => return Err(fail.error()),
-                _ if check > 100 => return Err(format!("SOmething is wrong in step")),
+                _ if check > 100 => return Err(format!("Something is wrong in step")),
                 _ => {
                     check += 1;
                     bind = bind.step()
@@ -54,8 +76,6 @@ where
         match self {
             Self::Start(mut st) => match st.cycle() {
                 Marker::LineStart => Self::LineStart(st.into()),
-                Marker::Ignore => Self::Ignore(st.into()),
-                Marker::LineEnd => Self::LineEnd(st.into()),
                 Marker::Done => Self::Done(st.into()),
                 _ => Self::Failure((format!("Invalid transition"), st).into()),
             },
@@ -86,6 +106,7 @@ where
             },
             st @ Self::Done(_) => st,
             st @ Self::Failure(_) => st,
+            Self::Dummy => panic!("Logic error, this is a bug"),
         }
     }
 }

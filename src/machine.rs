@@ -1,6 +1,8 @@
-use {
-    super::{scanner::*, states::*},
-    std::collections::VecDeque,
+use super::{
+    error::{Error, Result},
+    node::*,
+    scanner::*,
+    states::*,
 };
 
 pub(super) struct StateMachine<I, S = Start, INDENT = Inactive> {
@@ -9,9 +11,6 @@ pub(super) struct StateMachine<I, S = Start, INDENT = Inactive> {
 
     // Byte iter
     scan: Scan<I, INDENT>,
-
-    // Node storage
-    store: VecDeque<Vec<u8>>,
 }
 
 impl<I> StateMachine<I>
@@ -22,12 +21,11 @@ where
         StateMachine {
             state: Default::default(),
             scan: Scan::new(stream),
-            store: Default::default(),
         }
     }
 
-    pub(super) fn cycle(&mut self) -> Marker {
-        self.state.find_next(&mut self.scan)
+    pub(super) fn marker(&mut self) -> Result<Marker> {
+        Ok(self.state.find_next(&mut self.scan))
     }
 }
 
@@ -35,10 +33,10 @@ impl<I> StateMachine<I, WhiteSpace>
 where
     I: Iterator<Item = u8>,
 {
-    pub(super) fn cycle(&mut self) -> Marker {
+    pub(super) fn marker(&mut self) -> Result<Marker> {
         self.state.skip_whitespace(&mut self.scan);
 
-        self.state.find_next(&mut self.scan)
+        Ok(self.state.find_next(&mut self.scan))
     }
 }
 
@@ -46,7 +44,7 @@ impl<I> StateMachine<I, Ignore>
 where
     I: Iterator<Item = u8>,
 {
-    pub(super) fn cycle(&mut self) -> Marker {
+    pub(super) fn marker(&mut self) -> Result<Marker> {
         self.state.skip_til_whitespace(&mut self.scan);
 
         self.state.find_next(&mut self.scan)
@@ -57,10 +55,10 @@ impl<I> StateMachine<I, LineStart, Active>
 where
     I: Iterator<Item = u8>,
 {
-    pub(super) fn cycle(&mut self) -> Marker {
+    pub(super) fn marker(&mut self) -> Result<Marker> {
         self.state.update_indent(&mut self.scan);
 
-        self.state.find_next(&mut self.scan)
+        Ok(self.state.find_next(&mut self.scan))
     }
 }
 
@@ -68,8 +66,8 @@ impl<I> StateMachine<I, LineEnd>
 where
     I: Iterator<Item = u8>,
 {
-    pub(super) fn cycle(&mut self) -> Marker {
-        self.state.close_line(&mut self.scan);
+    pub(super) fn marker(&mut self) -> Result<Marker> {
+        self.state.close_line(&mut self.scan)?;
 
         self.state.find_next(&mut self.scan)
     }
@@ -79,7 +77,7 @@ impl<I> StateMachine<I, MapKey>
 where
     I: Iterator<Item = u8>,
 {
-    // pub(super) fn cycle(&mut self) -> Marker {
+    // pub(super) fn marker(&mut self) -> Marker {
     //     self.state.parse_key(&mut self.scan);
 
     //     Marker::Failure
@@ -96,25 +94,39 @@ where
     }
 }
 
-impl<I> StateMachine<I, Failure>
+pub(super) trait Transition<T>: Sized {
+    type Output;
+
+    fn transition(_: T, _: &mut Self::Output) -> Self;
+}
+
+pub(super) trait TransitionInto<T>: Sized {
+    type Output;
+
+    fn transform(self, _: &mut Self::Output) -> T;
+}
+
+impl<T, U> TransitionInto<U> for T
 where
-    I: Iterator<Item = u8>,
+    U: Transition<T>,
 {
-    pub(super) fn error(self) -> String {
-        self.state.into_inner()
+    type Output = U::Output;
+    fn transform(self, o: &mut Self::Output) -> U {
+        U::transition(self, o)
     }
 }
 
 /* Legal state transitions */
-impl<I> From<StateMachine<I, Start>> for StateMachine<I, LineStart, Active>
+impl<I> Transition<StateMachine<I, Start>> for StateMachine<I, LineStart, Active>
 where
     I: Iterator<Item = u8>,
 {
-    fn from(prev: StateMachine<I, Start>) -> Self {
+    type Output = Option<NodeKind>;
+
+    fn transition(prev: StateMachine<I, Start>, _: &mut Self::Output) -> Self {
         Self {
             state: Default::default(),
             scan: prev.scan.activate(),
-            store: Default::default(),
         }
     }
 }
@@ -122,12 +134,13 @@ where
 macro_rules! from_start {
     ( $($type:ident),* ) => {
         $(
-            impl<I: Iterator<Item = u8>> From<StateMachine<I, Start>> for StateMachine<I, $type> {
-                fn from(prev: StateMachine<I, Start>) -> Self {
+            impl<I: Iterator<Item = u8>> Transition<StateMachine<I, Start>> for StateMachine<I, $type> {
+                type Output = Option<NodeKind>;
+
+                fn transition(prev: StateMachine<I, Start>, _: &mut Self::Output) -> Self {
                     Self {
                         state: Default::default(),
                         scan: prev.scan,
-                        store: prev.store,
                     }
                 }
             }
@@ -140,12 +153,13 @@ from_start!(Done);
 macro_rules! from_whitespace {
     ( $($type:ident),* ) => {
         $(
-            impl<I: Iterator<Item = u8>> From<StateMachine<I, WhiteSpace>> for StateMachine<I, $type> {
-                fn from(prev: StateMachine<I, WhiteSpace>) -> Self {
+            impl<I: Iterator<Item = u8>> Transition<StateMachine<I, WhiteSpace>> for StateMachine<I, $type> {
+                type Output = Option<NodeKind>;
+
+                fn transition(prev: StateMachine<I, WhiteSpace>, _: &mut Self::Output) -> Self {
                     Self {
                         state: Default::default(),
                         scan: prev.scan,
-                        store: prev.store,
                     }
                 }
             }
@@ -158,12 +172,13 @@ from_whitespace!(LineEnd, Ignore, Done);
 macro_rules! from_ignore {
     ( $($type:ident),* ) => {
         $(
-            impl<I: Iterator<Item = u8>> From<StateMachine<I, Ignore>> for StateMachine<I, $type> {
-                fn from(prev: StateMachine<I, Ignore>) -> Self {
+            impl<I: Iterator<Item = u8>> Transition<StateMachine<I, Ignore>> for StateMachine<I, $type> {
+                type Output = Option<NodeKind>;
+
+                fn transition(prev: StateMachine<I, Ignore>, _: &mut Self::Output) -> Self {
                     Self {
                         state: Default::default(),
                         scan: prev.scan,
-                        store: prev.store,
                     }
                 }
             }
@@ -176,12 +191,13 @@ from_ignore!(LineEnd, WhiteSpace, Done);
 macro_rules! from_linestart {
     ( $($type:ident),* ) => {
         $(
-            impl<I: Iterator<Item = u8>> From<StateMachine<I, LineStart, Active>> for StateMachine<I, $type> {
-                fn from(prev: StateMachine<I, LineStart, Active>) -> Self {
+            impl<I: Iterator<Item = u8>> Transition<StateMachine<I, LineStart, Active>> for StateMachine<I, $type> {
+                type Output = Option<NodeKind>;
+
+                fn transition(prev: StateMachine<I, LineStart, Active>, _: &mut Self::Output) -> Self {
                     Self {
                         state: Default::default(),
                         scan: prev.scan.deactivate(),
-                        store: prev.store,
                     }
                 }
             }
@@ -194,12 +210,13 @@ from_linestart!(LineEnd, Ignore, Done);
 macro_rules! from_lineend {
     ( $($type:ident),* ) => {
         $(
-            impl<I: Iterator<Item = u8>> From<StateMachine<I, LineEnd>> for StateMachine<I, $type> {
-                fn from(prev: StateMachine<I, LineEnd>) -> Self {
+            impl<I: Iterator<Item = u8>> Transition<StateMachine<I, LineEnd>> for StateMachine<I, $type> {
+                type Output = Option<NodeKind>;
+
+                fn transition(prev: StateMachine<I, LineEnd>, _: &mut Self::Output) -> Self {
                     Self {
                         state: Default::default(),
                         scan: prev.scan,
-                        store: prev.store,
                     }
                 }
             }
@@ -209,43 +226,51 @@ macro_rules! from_lineend {
 
 from_lineend!(Done);
 
-impl<I> From<StateMachine<I, LineEnd>> for StateMachine<I, LineStart, Active>
+impl<I> Transition<StateMachine<I, LineEnd>> for StateMachine<I, LineStart, Active>
 where
     I: Iterator<Item = u8>,
 {
-    fn from(prev: StateMachine<I, LineEnd>) -> Self {
+    type Output = Option<NodeKind>;
+
+    fn transition(prev: StateMachine<I, LineEnd>, _: &mut Self::Output) -> Self {
         Self {
             state: Default::default(),
             scan: prev.scan.activate(),
-            store: prev.store,
         }
     }
 }
 
-impl<T, I, S> From<(T, StateMachine<I, S>)> for StateMachine<I, Failure>
+impl<I, S> Transition<(Error, StateMachine<I, S>)> for StateMachine<I, Failure>
 where
-    T: ToString,
     I: Iterator<Item = u8>,
 {
-    fn from((msg, prev): (T, StateMachine<I, S>)) -> Self {
+    type Output = Option<NodeKind>;
+
+    fn transition((err, prev): (Error, StateMachine<I, S>), output: &mut Self::Output) -> Self {
+        *output = Some(NodeKind::Failure(err));
+
         StateMachine {
-            state: Failure::new(msg),
+            state: Default::default(),
             scan: prev.scan,
-            store: prev.store,
         }
     }
 }
 
-impl<T, I, S> From<(T, StateMachine<I, S, Active>)> for StateMachine<I, Failure>
+impl<I, S> Transition<(Error, StateMachine<I, S, Active>)> for StateMachine<I, Failure>
 where
-    T: ToString,
     I: Iterator<Item = u8>,
 {
-    fn from((msg, prev): (T, StateMachine<I, S, Active>)) -> Self {
+    type Output = Option<NodeKind>;
+
+    fn transition(
+        (err, prev): (Error, StateMachine<I, S, Active>),
+        output: &mut Self::Output,
+    ) -> Self {
+        *output = Some(NodeKind::Failure(err));
+
         StateMachine {
-            state: Failure::new(msg),
+            state: Default::default(),
             scan: prev.scan.deactivate(),
-            store: prev.store,
         }
     }
 }

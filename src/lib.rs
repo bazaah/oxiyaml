@@ -4,8 +4,9 @@ mod machine;
 mod node;
 mod scanner;
 mod states;
+mod error;
 
-pub(self) use crate::{machine::StateMachine, scanner::*, states::*, node::NodeKind};
+pub(self) use crate::{machine::*, scanner::*, states::*, node::NodeKind, error::{Result, Error, ErrorKind}};
 
 const SAMPLE: &str = 
 /* Formatting */
@@ -31,7 +32,25 @@ where
         }
     }
 
-    fn next_output(&mut self) -> Result<NodeKind, String> {} 
+    fn next_node(&mut self) -> Result<NodeKind> {
+        let mut machine = std::mem::replace(&mut self.machine, State::Dummy);
+        
+        let node = loop {
+            let mut output = None;
+            machine = machine.step(&mut output);
+            
+            if let Some(res) = output.map(|node| match node {
+                NodeKind::Failure(err) => Err(err),
+                other => Ok(other),
+            }) {
+                break res;
+            }
+        };
+
+        std::mem::swap(&mut self.machine, &mut machine);
+
+        node
+    } 
 }
 
 enum State<I> {
@@ -55,54 +74,39 @@ where
         Self::Start(StateMachine::new(stream))
     }
 
-    fn process(self) -> Result<String, String> {
-        let mut check = 0;
-        let mut bind = self;
-
-        loop {
-            match bind {
-                Self::Done(dn) => return Ok(dn.done()),
-                Self::Failure(fail) => return Err(fail.error()),
-                _ if check > 100 => return Err(format!("Something is wrong in step")),
-                _ => {
-                    check += 1;
-                    bind = bind.step()
-                }
-            }
-        }
-    }
-
-    fn step(self) -> Self {
+    fn step(self, o: &mut Option<NodeKind>) -> Self {
         match self {
-            Self::Start(mut st) => match st.cycle() {
-                Marker::LineStart => Self::LineStart(st.into()),
-                Marker::Done => Self::Done(st.into()),
-                _ => Self::Failure((format!("Invalid transition"), st).into()),
+            Self::Start(mut st) => match st.marker() {
+                Ok(Marker::LineStart) => Self::LineStart(st.transform(o)),
+                Ok(Marker::Done) => Self::Done(st.transform(o)),
+                Err(e) => Self::Failure((e, st).transform(o)),
+                _ => Self::Failure((ErrorKind::IllegalTransition.into(), st).transform(o)),
             },
-            Self::WhiteSpace(mut st) => match st.cycle() {
-                Marker::LineEnd => Self::LineEnd(st.into()),
-                Marker::Ignore => Self::Ignore(st.into()),
-                Marker::Done => Self::Done(st.into()),
-                _ => Self::Failure((format!("Invalid transition"), st).into()),
+            Self::WhiteSpace(mut st) => match st.marker() {
+                Ok(Marker::LineEnd) => Self::LineEnd(st.transform(o)),
+                Ok(Marker::Ignore) => Self::Ignore(st.transform(o)),
+                Ok(Marker::Done) => Self::Done(st.transform(o)),
+                Err(e) => Self::Failure((e, st).transform(o)),
+                _ => Self::Failure((ErrorKind::IllegalTransition.into(), st).transform(o)),
             },
-            Self::Ignore(mut st) => match st.cycle() {
-                Marker::LineEnd => Self::LineEnd(st.into()),
-                Marker::WhiteSpace => Self::WhiteSpace(st.into()),
-                Marker::Done => Self::Done(st.into()),
-                Marker::Failure => Self::Failure((format!("State violation (Ignore)"), st).into()),
-                _ => Self::Failure((format!("Invalid transition"), st).into()),
+            Self::Ignore(mut st) => match st.marker() {
+                Ok(Marker::LineEnd) => Self::LineEnd(st.transform(o)),
+                Ok(Marker::WhiteSpace) => Self::WhiteSpace(st.transform(o)),
+                Ok(Marker::Done) => Self::Done(st.transform(o)),
+                Err(e) => Self::Failure((e, st).transform(o)),
+                _ => Self::Failure((ErrorKind::IllegalTransition.into(), st).transform(o)),
             },
-            Self::LineStart(mut st) => match st.cycle() {
-                Marker::LineEnd => Self::LineEnd(st.into()),
-                Marker::Ignore => Self::Ignore(st.into()),
-                Marker::Done => Self::Done(st.into()),
-                _ => Self::Failure((format!("Invalid transition"), st).into()),
+            Self::LineStart(mut st) => match st.marker() {
+                Ok(Marker::LineEnd) => Self::LineEnd(st.transform(o)),
+                Ok(Marker::Ignore) => Self::Ignore(st.transform(o)),
+                Ok(Marker::Done) => Self::Done(st.transform(o)),
+                _ => Self::Failure((ErrorKind::IllegalTransition.into(), st).transform(o)),
             },
-            Self::LineEnd(mut st) => match st.cycle() {
-                Marker::LineStart => Self::LineStart(st.into()),
-                Marker::Done => Self::Done(st.into()),
-                Marker::Failure => Self::Failure((format!("State violation (LineEnd)"), st).into()),
-                _ => Self::Failure((format!("Invalid transition"), st).into()),
+            Self::LineEnd(mut st) => match st.marker() {
+                Ok(Marker::LineStart) => Self::LineStart(st.transform(o)),
+                Ok(Marker::Done) => Self::Done(st.transform(o)),
+                Err(e) => Self::Failure((e, st).transform(o)),
+                _ => Self::Failure((ErrorKind::IllegalTransition.into(), st).transform(o)),
             },
             st @ Self::Done(_) => st,
             st @ Self::Failure(_) => st,
@@ -115,13 +119,13 @@ where
 mod tests {
     use super::*;
 
-    #[test]
-    fn check_state_machine() {
-        let data = SAMPLE;
-        let result = State::new(data.bytes()).process();
+    // #[test]
+    // fn check_state_machine() {
+    //     let data = SAMPLE;
+    //     let result = State::new(data.bytes()).process();
 
-        println!("State machine says: {:?}", result);
+    //     println!("State machine says: {:?}", result);
 
-        panic!();
-    }
+    //     panic!();
+    // }
 }

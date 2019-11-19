@@ -1,9 +1,5 @@
-use super::Error;
-
 #[derive(Debug)]
 pub(super) enum NodeKind {
-    Key(String),
-    ScalarPlain(String),
-    Failure(Error),
-    Done,
+    Key(Vec<u8>),
+    ScalarPlain(Vec<u8>),
 }

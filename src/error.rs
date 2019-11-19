@@ -19,10 +19,12 @@ impl Error {
             | ErrorKind::InvalidChar
             | ErrorKind::ScalarInvalid
             | ErrorKind::SoloCarriageReturn
-            | ErrorKind::InvalidEOL => Category::Data,
-            ErrorKind::IllegalTransition | ErrorKind::StateViolation | ErrorKind::EOFMapping => {
-                Category::State
-            }
+            | ErrorKind::InvalidEOL
+            | ErrorKind::InvalidEOF => Category::Data,
+            ErrorKind::IllegalTransition
+            | ErrorKind::StateViolation
+            | ErrorKind::EOFMapping
+            | ErrorKind::RepeatFailure => Category::State,
         }
     }
 }
@@ -35,9 +37,11 @@ impl From<ErrorKind> for Error {
     }
 }
 
-impl From<Err> for Error {
-    fn from(e: Err) -> Self {
-        Self { inner: Box::new(e) }
+impl<T: Into<Err>> From<T> for Error {
+    fn from(err: T) -> Self {
+        Self {
+            inner: Box::new(err.into()),
+        }
     }
 }
 
@@ -70,7 +74,7 @@ impl From<Error> for io::Error {
 }
 
 #[derive(Debug)]
-pub(super) struct Err {
+pub struct Err {
     err: ErrorKind,
     cxt: Option<Context>,
 }
@@ -97,6 +101,9 @@ pub(super) enum ErrorKind {
 
     Io(io::Error),
 
+    // Default error returned when parser has already errored
+    RepeatFailure,
+
     IllegalTransition,
 
     StateViolation,
@@ -108,6 +115,8 @@ pub(super) enum ErrorKind {
     EOFMapping,
 
     InvalidEOL,
+
+    InvalidEOF,
 
     SoloCarriageReturn,
 }
@@ -123,6 +132,7 @@ impl Display for ErrorKind {
         match self {
             Self::Message(msg) => write!(f, "{}", msg),
             Self::Io(err) => write!(f, "IO error: {}", err),
+            Self::RepeatFailure => write!(f, "Attempted to drive an already failed parser"),
             Self::IllegalTransition => write!(
                 f,
                 "Parser attempted an illegal state transition... this is a bug"
@@ -135,6 +145,7 @@ impl Display for ErrorKind {
                 "Parser encountered an unexpected EOF while parsing a mapping"
             ),
             Self::InvalidEOL => write!(f, "Parser encountered an invalid EOL"),
+            Self::InvalidEOF => write!(f, "Parser encountered an invalid EOF"),
             Self::SoloCarriageReturn => write!(f, "Parser encountered a solo carriage return"),
         }
     }

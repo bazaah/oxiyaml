@@ -1,4 +1,10 @@
-use super::*;
+use {
+    super::{
+        error::{Error, ErrorKind, Result},
+        scanner::*,
+    },
+    std::io,
+};
 
 macro_rules! make_local {
     ($val:ident) => {
@@ -15,16 +21,19 @@ macro_rules! make_local {
 pub(super) enum Marker {
     // Base
     Start,
-    WhiteSpace,
-    Ignore,
+    //WhiteSpace,
+    //Ignore,
     LineEnd,
     LineStart,
     Done,
 
+    // Ambiguous
+    AmbiguousScalar,
+    AmbiguousColon,
+
     // Map
     MapStart,
-    MapKey,
-    MapDelimiter,
+    VerifyKey,
     MapWhiteSpace,
     MapValue,
     MapEnd,
@@ -35,56 +44,129 @@ pub(super) enum Marker {
 pub(super) struct Start;
 
 impl Start {
-    pub(super) fn find_next(&self, iter: &mut Scan<impl Iterator<Item = u8>>) -> Marker {
-        match iter.peak() {
-            Some(_) => Marker::LineStart,
-            None => Marker::Done,
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-pub(super) struct WhiteSpace;
-
-impl WhiteSpace {
-    pub(super) fn find_next(&self, iter: &mut Scan<impl Iterator<Item = u8>>) -> Marker {
-        match iter.peak() {
-            Some(b'\n') | Some(b'\r') => Marker::LineEnd,
-            Some(_txt) => Marker::Ignore,
-            None => Marker::Done,
-        }
-    }
-
-    pub(super) fn skip_whitespace(&self, iter: &mut Scan<impl Iterator<Item = u8>>) {
-        loop {
-            match iter.peak() {
-                Some(b' ') | Some(b'\t') => iter.discard(),
-                _ => break,
-            }
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-pub(super) struct Ignore;
-
-impl Ignore {
-    pub(super) fn find_next(&self, iter: &mut Scan<impl Iterator<Item = u8>>) -> Result<Marker> {
-        match iter.peak() {
-            Some(b'\n') | Some(b'\r') => Ok(Marker::LineEnd),
-            Some(b' ') | Some(b'\t') => Ok(Marker::WhiteSpace),
+    pub(super) fn find_next(&self, iter: &mut Scan<impl Iterator<Item = Byte>>) -> Result<Marker> {
+        match iter.peak()? {
+            Some(_) => Ok(Marker::LineStart),
             None => Ok(Marker::Done),
-            Some(err) => Err(ErrorKind::InvalidChar.with_context(err))?,
         }
     }
+}
 
-    pub(super) fn skip_til_whitespace(&self, iter: &mut Scan<impl Iterator<Item = u8>>) {
+// #[derive(Debug, Default)]
+// pub(super) struct WhiteSpace;
+
+// impl WhiteSpace {
+//     pub(super) fn find_next(&self, iter: &mut Scan<impl Iterator<Item = Byte>>) -> Result<Marker> {
+//         match iter.peak()? {
+//             Some(b'\n') | Some(b'\r') => Ok(Marker::LineEnd),
+//             Some(_txt) => Ok(Marker::Ignore),
+//             None => Ok(Marker::Done),
+//         }
+//     }
+
+//     pub(super) fn skip_whitespace(
+//         &self,
+//         iter: &mut Scan<impl Iterator<Item = Byte>>,
+//     ) -> Result<()> {
+//         loop {
+//             match iter.peak()? {
+//                 Some(b' ') | Some(b'\t') => iter.discard(),
+//                 _ => break Ok(()),
+//             }
+//         }
+//     }
+// }
+
+// #[derive(Debug, Default)]
+// pub(super) struct Ignore;
+
+// impl Ignore {
+//     pub(super) fn find_next(&self, iter: &mut Scan<impl Iterator<Item = Byte>>) -> Result<Marker> {
+//         match iter.peak()? {
+//             Some(b'\n') | Some(b'\r') => Ok(Marker::LineEnd),
+//             Some(b' ') | Some(b'\t') => Ok(Marker::WhiteSpace),
+//             None => Ok(Marker::Done),
+//             Some(err) => Err(ErrorKind::InvalidChar.with_context(err))?,
+//         }
+//     }
+
+//     pub(super) fn skip_til_whitespace(
+//         &self,
+//         iter: &mut Scan<impl Iterator<Item = Byte>>,
+//     ) -> Result<()> {
+//         loop {
+//             match iter.peak()? {
+//                 Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') => break Ok(()),
+//                 None => break Ok(()),
+//                 _ => iter.discard(),
+//             }
+//         }
+//     }
+// }
+
+#[derive(Debug, Default)]
+pub(super) struct AmbiguousScalar {
+    scratch: Vec<u8>,
+}
+
+impl AmbiguousScalar {
+    pub(super) fn find_next(
+        &mut self,
+        iter: &mut Scan<impl Iterator<Item = Byte>>,
+    ) -> Result<Marker> {
+        make_local!(iter);
+
         loop {
-            match iter.peak() {
-                Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') => break,
-                None => break,
-                _ => iter.discard(),
+            match iter.peak()? {
+                Some(ch @ b' ')
+                | Some(ch @ b'\t')
+                | Some(ch @ b'a'..=b'z')
+                | Some(ch @ b'A'..=b'Z') => discard_and!(self.scratch.push(ch)),
+                Some(b':') => break Ok(Marker::AmbiguousColon),
+                Some(err) => Err(ErrorKind::InvalidChar.with_context(err))?,
+                None => break Ok(Marker::Done),
             }
+        }
+    }
+}
+
+impl From<AmbiguousScalar> for AmbiguousColon {
+    fn from(prev: AmbiguousScalar) -> Self {
+        Self {
+            scratch: prev.scratch,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct AmbiguousColon {
+    scratch: Vec<u8>,
+}
+
+impl AmbiguousColon {
+    pub(super) fn find_next(
+        &mut self,
+        iter: &mut Scan<impl Iterator<Item = Byte>>,
+    ) -> Result<Marker> {
+        make_local!(iter);
+
+        match iter.peak()? {
+            Some(b':') => discard_and!(match iter.peak()? {
+                Some(b' ') | Some(b'\t') => discard_and!(Ok(Marker::MapStart)),
+                Some(b'a'..=b'z') | Some(b'A'..=b'Z') => Ok(Marker::AmbiguousScalar),
+                Some(err) => Err(ErrorKind::InvalidChar.with_context(err))?,
+                None => Err(ErrorKind::InvalidEOF)?,
+            }),
+            Some(err) => Err(ErrorKind::InvalidChar.with_context(([b':'], err)))?,
+            None => Err(ErrorKind::InvalidEOF)?,
+        }
+    }
+}
+
+impl From<AmbiguousColon> for AmbiguousScalar {
+    fn from(prev: AmbiguousColon) -> Self {
+        Self {
+            scratch: prev.scratch,
         }
     }
 }
@@ -93,30 +175,38 @@ impl Ignore {
 pub(super) struct LineStart;
 
 impl LineStart {
-    pub(super) fn find_next(&self, iter: &mut Scan<impl Iterator<Item = u8>, Active>) -> Marker {
-        match iter.peak() {
-            Some(b'\n') | Some(b'\r') => Marker::LineEnd,
-            Some(_) => Marker::Ignore,
-            None => Marker::Done,
+    pub(super) fn find_next(
+        &self,
+        iter: &mut Scan<impl Iterator<Item = Byte>, Active>,
+    ) -> Result<Marker> {
+        match iter.peak()? {
+            Some(b'\n') | Some(b'\r') => Ok(Marker::LineEnd),
+            Some(_) => Ok(Marker::AmbiguousScalar),
+            None => Ok(Marker::Done),
         }
     }
 
-    pub(super) fn update_indent(&self, iter: &mut Scan<impl Iterator<Item = u8>, Active>) {
-        let indent = self.count_indent(iter);
+    pub(super) fn update_indent(
+        &self,
+        iter: &mut Scan<impl Iterator<Item = Byte>, Active>,
+    ) -> Result<()> {
+        let indent = self.count_indent(iter)?;
         iter.update_indent(indent);
+
+        Ok(())
     }
 
-    fn count_indent(&self, iter: &mut Scan<impl Iterator<Item = u8>, Active>) -> u16 {
+    fn count_indent(&self, iter: &mut Scan<impl Iterator<Item = Byte>, Active>) -> Result<u16> {
         make_local!(iter);
         let mut count = 0;
         loop {
-            match iter.peak() {
+            match iter.peak()? {
                 Some(b' ') | Some(b'\t') => discard_and!(count += 1),
                 _ => break,
             }
         }
 
-        count
+        Ok(count)
     }
 }
 
@@ -124,8 +214,8 @@ impl LineStart {
 pub(super) struct LineEnd;
 
 impl LineEnd {
-    pub(super) fn find_next(&self, iter: &mut Scan<impl Iterator<Item = u8>>) -> Result<Marker> {
-        match iter.peak() {
+    pub(super) fn find_next(&self, iter: &mut Scan<impl Iterator<Item = Byte>>) -> Result<Marker> {
+        match iter.peak()? {
             Some(b' ') | Some(b'\t') | Some(b'a'..=b'z') | Some(b'A'..=b'Z') => {
                 Ok(Marker::LineStart)
             }
@@ -134,12 +224,12 @@ impl LineEnd {
         }
     }
 
-    pub(super) fn close_line(&self, iter: &mut Scan<impl Iterator<Item = u8>>) -> Result<()> {
+    pub(super) fn close_line(&self, iter: &mut Scan<impl Iterator<Item = Byte>>) -> Result<()> {
         make_local!(iter);
         loop {
-            match iter.peak() {
+            match iter.peak()? {
                 Some(b'\n') => discard_and!(break Ok(())),
-                Some(b'\r') => discard_and!(match iter.peak() {
+                Some(b'\r') => discard_and!(match iter.peak()? {
                     Some(b'\n') => discard_and!(break Ok(())),
                     _ => break Err(ErrorKind::SoloCarriageReturn)?,
                 }),
@@ -153,8 +243,22 @@ impl LineEnd {
 #[derive(Debug, Default)]
 pub(super) struct Done;
 
-#[derive(Debug, Default)]
-pub(super) struct Failure;
+#[derive(Debug)]
+pub(super) struct Failure(Option<Error>);
+
+impl Failure {
+    pub(super) fn error(&mut self) -> Error {
+        self.0
+            .take()
+            .unwrap_or_else(|| ErrorKind::RepeatFailure.into())
+    }
+}
+
+impl From<Error> for Failure {
+    fn from(e: Error) -> Self {
+        Self(Some(e))
+    }
+}
 
 /* Map */
 
@@ -165,9 +269,9 @@ pub(super) struct MapStart {
 }
 
 impl MapStart {
-    pub(super) fn find_next(&self, iter: &mut Scan<impl Iterator<Item = u8>>) -> Result<Marker> {
-        match iter.peak() {
-            Some(_) => Ok(Marker::MapKey),
+    pub(super) fn find_next(&self, iter: &mut Scan<impl Iterator<Item = Byte>>) -> Result<Marker> {
+        match iter.peak()? {
+            Some(_) => Ok(Marker::VerifyKey),
             None => Err(ErrorKind::EOFMapping.into()),
         }
     }
@@ -187,7 +291,7 @@ impl MapStart {
     }
 }
 
-impl From<MapStart> for MapKey {
+impl From<MapStart> for VerifyKey {
     fn from(prev: MapStart) -> Self {
         Self {
             indent_floor: prev.indent_floor,
@@ -197,21 +301,20 @@ impl From<MapStart> for MapKey {
 }
 
 #[derive(Debug)]
-pub(super) struct MapKey {
+pub(super) struct VerifyKey {
     indent_floor: u16,
     scratch: Vec<u8>,
 }
 
-impl MapKey {
-    pub(super) fn find_next(&self, iter: &mut Scan<impl Iterator<Item = u8>>) -> Result<Marker> {
-        match iter.peak() {
-            Some(b':') => Ok(Marker::MapDelimiter),
-            Some(err) => Err(ErrorKind::InvalidChar.with_context(([b':'], err)))?,
+impl VerifyKey {
+    pub(super) fn find_next(&self, iter: &mut Scan<impl Iterator<Item = Byte>>) -> Result<Marker> {
+        match iter.peak()? {
+            Some(_) => Ok(Marker::MapWhiteSpace),
             None => Err(ErrorKind::EOFMapping)?,
         }
     }
 
-    pub(super) fn parse_key(&mut self) -> Result<()> {
+    pub(super) fn parse_key(&mut self, _: &mut Scan<impl Iterator<Item = Byte>>) -> Result<()> {
         while let Some(ch) = self.scratch.iter().next() {
             match ch {
                 b'a'..=b'z' | b'A'..=b'Z' | b' ' | b'\t' => (),
@@ -227,51 +330,10 @@ impl MapKey {
     }
 }
 
-impl From<MapKey> for MapDelimiter {
-    fn from(prev: MapKey) -> Self {
+impl From<VerifyKey> for MapWhiteSpace {
+    fn from(prev: VerifyKey) -> Self {
         Self {
             indent_floor: prev.indent_floor,
-            key: prev.scratch,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(super) struct MapDelimiter {
-    indent_floor: u16,
-    key: Vec<u8>,
-}
-
-impl MapDelimiter {
-    pub(super) fn find_next(&self, iter: &mut Scan<impl Iterator<Item = u8>>) -> Result<Marker> {
-        match iter.peak() {
-            Some(b' ') | Some(b'\t') => Ok(Marker::MapWhiteSpace),
-            Some(b'a'..=b'z') | Some(b'A'..=b'Z') => Ok(Marker::MapValue),
-            Some(err) => Err(ErrorKind::InvalidChar.with_context(err))?,
-            None => Err(ErrorKind::EOFMapping)?,
-        }
-    }
-
-    pub(super) fn parse_delimiter(&self, iter: &mut Scan<impl Iterator<Item = u8>>) -> Result<()> {
-        make_local!(iter);
-
-        match iter.peak() {
-            Some(b':') => discard_and!(match iter.peak() {
-                Some(b' ') | Some(b'\t') => discard_and!(Ok(())),
-                Some(err) => Err(ErrorKind::InvalidChar.with_context((&[b' ', b'\t'], err)))?,
-                None => Err(ErrorKind::EOFMapping)?,
-            }),
-            Some(err) => Err(ErrorKind::InvalidChar.with_context((&[b':'], err)))?,
-            None => Err(ErrorKind::EOFMapping)?,
-        }
-    }
-}
-
-impl From<MapDelimiter> for MapWhiteSpace {
-    fn from(prev: MapDelimiter) -> Self {
-        Self {
-            indent_floor: prev.indent_floor,
-            key: prev.key,
         }
     }
 }
@@ -279,20 +341,22 @@ impl From<MapDelimiter> for MapWhiteSpace {
 #[derive(Debug)]
 pub(super) struct MapWhiteSpace {
     indent_floor: u16,
-    key: Vec<u8>,
 }
 
 impl MapWhiteSpace {
-    pub(super) fn find_next(&self, iter: &mut Scan<impl Iterator<Item = u8>>) -> Result<Marker> {
-        match iter.peak() {
+    pub(super) fn find_next(&self, iter: &mut Scan<impl Iterator<Item = Byte>>) -> Result<Marker> {
+        match iter.peak()? {
             Some(b'a'..=b'z') | Some(b'A'..=b'Z') => Ok(Marker::MapValue),
             _ => Err(ErrorKind::Message("Unclear fail state".into()))?,
         }
     }
 
-    pub(super) fn parse_whitespace(&self, iter: &mut Scan<impl Iterator<Item = u8>>) -> Result<()> {
+    pub(super) fn parse_whitespace(
+        &self,
+        iter: &mut Scan<impl Iterator<Item = Byte>>,
+    ) -> Result<()> {
         loop {
-            match iter.peak() {
+            match iter.peak()? {
                 Some(b' ') | Some(b'\t') => iter.discard(),
                 Some(b'a'..=b'z') | Some(b'A'..=b'Z') => break Ok(()),
                 Some(b'|') | Some(b'>') => unimplemented!("Can't parse block/flow indicators!"),
@@ -308,7 +372,6 @@ impl From<MapWhiteSpace> for MapValue {
     fn from(prev: MapWhiteSpace) -> Self {
         Self {
             indent_floor: prev.indent_floor,
-            key: prev.key,
             value: Default::default(),
         }
     }
@@ -317,16 +380,26 @@ impl From<MapWhiteSpace> for MapValue {
 #[derive(Debug)]
 pub(super) struct MapValue {
     indent_floor: u16,
-    key: Vec<u8>,
     value: Vec<u8>,
 }
 
 impl MapValue {
-    pub(super) fn parse_value(&mut self, iter: &mut Scan<impl Iterator<Item = u8>>) -> Result<()> {
+    pub(super) fn find_next(&self, iter: &mut Scan<impl Iterator<Item = Byte>>) -> Result<Marker> {
+        match iter.peak()? {
+            Some(b'\n') | Some(b'\r') => Ok(Marker::LineEnd),
+            Some(err) => Err(ErrorKind::InvalidChar.with_context(([b'\n', b'\r'], err)))?,
+            None => Ok(Marker::Done),
+        }
+    }
+
+    pub(super) fn parse_value(
+        &mut self,
+        iter: &mut Scan<impl Iterator<Item = Byte>>,
+    ) -> Result<()> {
         make_local!(iter);
 
         loop {
-            match iter.peak() {
+            match iter.peak()? {
                 Some(ch @ b' ')
                 | Some(ch @ b'\t')
                 | Some(ch @ b'a'..=b'z')
@@ -338,8 +411,8 @@ impl MapValue {
     }
 }
 
-#[derive(Debug)]
-pub(super) struct MapEnd;
+// #[derive(Debug)]
+// pub(super) struct MapEnd;
 
 fn is_whitespace(c: &u8) -> bool {
     *c == b'\t' || *c == b' '

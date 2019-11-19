@@ -1,3 +1,7 @@
+use {super::error::Result, std::io};
+
+pub(super) type Byte = io::Result<u8>;
+
 #[derive(Debug)]
 pub(super) struct Scan<I, S = Inactive> {
     ch: Option<u8>,
@@ -7,27 +11,29 @@ pub(super) struct Scan<I, S = Inactive> {
 
 impl<I, S> Scan<I, S>
 where
-    I: Iterator<Item = u8>,
+    I: Iterator<Item = Byte>,
 {
-    pub(super) fn next(&mut self) -> Option<u8> {
+    pub(super) fn next(&mut self) -> Result<Option<u8>> {
         match self.ch.take() {
-            ch @ Some(_) => ch,
+            ch @ Some(_) => Ok(ch),
             None => match self.iter.next() {
-                ch @ Some(_) => ch,
-                None => None,
+                Some(Err(e)) => Err(e)?,
+                Some(Ok(ch)) => Ok(Some(ch)),
+                None => Ok(None),
             },
         }
     }
 
-    pub(super) fn peak(&mut self) -> Option<u8> {
+    pub(super) fn peak(&mut self) -> Result<Option<u8>> {
         match self.ch {
-            ch @ Some(_) => ch,
+            ch @ Some(_) => Ok(ch),
             None => match self.iter.next() {
-                ch @ Some(_) => {
-                    self.ch = ch;
-                    self.ch
+                Some(Err(e)) => Err(e)?,
+                Some(Ok(ch)) => {
+                    self.ch = Some(ch);
+                    Ok(self.ch)
                 }
-                None => None,
+                None => Ok(None),
             },
         }
     }
@@ -63,7 +69,7 @@ where
 
 impl<I> Scan<I, Active>
 where
-    I: Iterator<Item = u8>,
+    I: Iterator<Item = Byte>,
 {
     pub(super) fn update_indent(&mut self, new: u16) {
         self.indent.update(new);
@@ -80,7 +86,7 @@ where
 
 impl<I> Scan<I, Inactive>
 where
-    I: Iterator<Item = u8>,
+    I: Iterator<Item = Byte>,
 {
     pub(super) fn new(iter: I) -> Self {
         Self {

@@ -5,8 +5,11 @@ mod node;
 mod scanner;
 mod states;
 mod error;
+mod event;
 
-pub(self) use crate::{machine::*, scanner::*, states::*, node::NodeKind, error::{Result, Error, ErrorKind}};
+use std::io;
+
+use crate::{machine::*, scanner::*, states::*, node::NodeKind, error::{Result, Error, ErrorKind}, event::{TransitionInto, Event}};
 
 const SAMPLE: &str = 
 /* Formatting */
@@ -18,32 +21,29 @@ r#"zero
 zero
 "#;
 
-struct Handle<I> {
-    machine: State<I>,
+struct Handle<R> {
+    machine: State<io::Bytes<R>>,
 }
 
-impl<I> Handle<I>
+impl<R> Handle<R>
 where
-    I: Iterator<Item = u8>,
+    R: io::Read,
 {
-    fn new(stream: I) -> Self {
+    fn new(stream: R) -> Self {
         Self {
-            machine: State::new(stream),
+            machine: State::new(stream.bytes()),
         }
     }
 
-    fn next_node(&mut self) -> Result<NodeKind> {
+    fn next_node(&mut self) -> Option<Result<NodeKind>> {
         let mut machine = std::mem::replace(&mut self.machine, State::Dummy);
         
         let node = loop {
             let mut output = None;
             machine = machine.step(&mut output);
             
-            if let Some(res) = output.map(|node| match node {
-                NodeKind::Failure(err) => Err(err),
-                other => Ok(other),
-            }) {
-                break res;
+            if let Some(event) = output {
+                break event.transpose()
             }
         };
 
@@ -68,13 +68,13 @@ enum State<I> {
 
 impl<I> State<I>
 where
-    I: Iterator<Item = u8>,
+    I: Iterator<Item = io::Result<u8>>,
 {
     fn new(stream: I) -> Self {
         Self::Start(StateMachine::new(stream))
     }
 
-    fn step(self, o: &mut Option<NodeKind>) -> Self {
+    fn step(self, o: &mut Event) -> Self {
         match self {
             Self::Start(mut st) => match st.marker() {
                 Ok(Marker::LineStart) => Self::LineStart(st.transform(o)),
@@ -108,8 +108,8 @@ where
                 Err(e) => Self::Failure((e, st).transform(o)),
                 _ => Self::Failure((ErrorKind::IllegalTransition.into(), st).transform(o)),
             },
-            st @ Self::Done(_) => st,
-            st @ Self::Failure(_) => st,
+            Self::Done(st) => Self::Done(st.transform(o)),
+            Self::Failure(st) => Self::Failure(st.transform(o)),
             Self::Dummy => panic!("Logic error, this is a bug"),
         }
     }

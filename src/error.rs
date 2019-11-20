@@ -27,6 +27,21 @@ impl Error {
             | ErrorKind::RepeatFailure => Category::State,
         }
     }
+
+    pub fn kind(&self) -> &ErrorKind {
+        &self.inner.err
+    }
+
+    pub fn context(&self) -> Option<&Context> {
+        self.inner.cxt.as_ref()
+    }
+
+    pub(super) fn has_failed(&self) -> bool {
+        match self.inner.err {
+            ErrorKind::RepeatFailure => true,
+            _ => false,
+        }
+    }
 }
 
 impl From<ErrorKind> for Error {
@@ -96,7 +111,7 @@ impl From<io::Error> for Err {
 }
 
 #[derive(Debug)]
-pub(super) enum ErrorKind {
+pub enum ErrorKind {
     Message(Box<str>),
 
     Io(io::Error),

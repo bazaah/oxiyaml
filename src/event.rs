@@ -1,7 +1,9 @@
 use super::{node::NodeKind, Error, Result};
 
+/// Type def for an event
 pub(super) type Event = Option<EventKind>;
 
+/// Describes the possible events that can occur
 #[derive(Debug)]
 pub(super) enum EventKind {
     Node(NodeKind),
@@ -10,10 +12,11 @@ pub(super) enum EventKind {
 }
 
 impl EventKind {
+    /// Converts an event into the equivalent Option/Result nesting
     pub(super) fn transpose(self) -> Option<Result<NodeKind>> {
         match self {
             Self::Node(node) => Some(Ok(node)),
-            Self::Failure(err) if err.has_failed() => None,
+            Self::Failure(err) if err.is_repeat() => None,
             Self::Failure(err) => Some(Err(err)),
             Self::Done => None,
         }
@@ -37,25 +40,3 @@ impl From<()> for EventKind {
         Self::Done
     }
 }
-
-// pub(super) trait Transition<T>: Sized {
-//     type Output;
-
-//     fn transition(_: T, _: &mut Self::Output) -> Self;
-// }
-
-// pub(super) trait TransitionInto<T>: Sized {
-//     type Output;
-
-//     fn transform(self, _: &mut Self::Output) -> T;
-// }
-
-// impl<T, U> TransitionInto<U> for T
-// where
-//     U: Transition<T>,
-// {
-//     type Output = U::Output;
-//     fn transform(self, o: &mut Self::Output) -> U {
-//         U::transition(self, o)
-//     }
-// }

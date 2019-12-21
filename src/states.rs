@@ -374,7 +374,8 @@ impl MapValue {
                 Some(ch @ b' ')
                 | Some(ch @ b'\t')
                 | Some(ch @ b'a'..=b'z')
-                | Some(ch @ b'A'..=b'Z') => discard_and!(self.value.push(ch)),
+                | Some(ch @ b'A'..=b'Z')
+                | Some(ch @ b':') => discard_and!(self.value.push(ch)),
                 Some(b'\n') | Some(b'\r') | None => break Ok(()),
                 Some(err) => break Err(ErrorKind::ScalarInvalid.with_context(err))?,
             }

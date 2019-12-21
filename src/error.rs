@@ -1,12 +1,12 @@
 use std::{
     error,
-    fmt::{self, Display},
+    fmt::{self, Debug, Display},
     io, result,
 };
 
+/// Local Result type def
 pub type Result<T> = result::Result<T, Error>;
 
-#[derive(Debug)]
 pub struct Error {
     inner: Box<Err>,
 }
@@ -36,7 +36,8 @@ impl Error {
         self.inner.cxt.as_ref()
     }
 
-    pub(super) fn has_failed(&self) -> bool {
+    /// Helper for checking if this is a repeat error
+    pub(super) fn is_repeat(&self) -> bool {
         match self.inner.err {
             ErrorKind::RepeatFailure => true,
             _ => false,
@@ -61,6 +62,18 @@ impl<T: Into<Err>> From<T> for Error {
 }
 
 impl Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.inner.err)?;
+
+        if let Some(cxt) = self.inner.cxt.as_ref() {
+            write!(f, " {}", cxt)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.inner.err)?;
 
